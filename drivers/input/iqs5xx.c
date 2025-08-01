@@ -76,7 +76,7 @@ static void iqs5xx_report_data(const struct device *dev) {
     const struct iqs5xx_config *cfg = dev->config;
     struct iqs5xx_data *data = dev->data;
 
-    /* Example: read a status byte, relative X, Y, gesture. */
+    // Read status byte to check if data is ready
     uint8_t status_byte;
     int ret = iqs5xx_i2c_seq_read_16(cfg, IQS5XX_REG_STATUS, &status_byte, 1);
     if (ret < 0) {
@@ -84,39 +84,47 @@ static void iqs5xx_report_data(const struct device *dev) {
         return;
     }
 
-    /* If status indicates no data or not ready, bail out. */
+    // If no data is ready, exit
     if ((status_byte & IQS5XX_STATUS_DRDY_BIT) == 0) {
         return;
     }
 
+    // Read relative X and Y (4 bytes total)
     uint8_t buffer[4];
     ret = iqs5xx_i2c_seq_read_16(cfg, IQS5XX_REG_REL_X, buffer, sizeof(buffer));
     if (ret < 0) {
-        LOG_ERR("IQS5xx read XY/gest err=%d", ret);
+        LOG_ERR("IQS5xx read XY err=%d", ret);
         return;
     }
 
-    /* Suppose 0:relX(8-bit), 1:relY(8-bit), 2:gesture, 3:some button bits. */
-    int8_t rel_x = (int8_t)buffer[0];
-    int8_t rel_y = (int8_t)buffer[1];
-    uint8_t gest = buffer[2];
-    uint8_t btn = buffer[3];
+    // Correctly read relative X and Y as 16-bit signed values
+    int16_t rel_x = (int16_t)((buffer[1] << 8) | buffer[0]);
+    int16_t rel_y = (int16_t)((buffer[3] << 8) | buffer[2]);
 
-    /* Optionally invert X or Y */
-    if (cfg->x_invert) {
-        rel_x = -rel_x;
+    // Read gesture events
+    uint8_t gesture0, gesture1;
+    ret = iqs5xx_i2c_seq_read_16(cfg, 0x000D, &gesture0, 1);
+    if (ret < 0) {
+        LOG_ERR("IQS5xx read gesture0 err=%d", ret);
+        return;
     }
-    if (cfg->y_invert) {
-        rel_y = -rel_y;
+    ret = iqs5xx_i2c_seq_read_16(cfg, 0x000E, &gesture1, 1);
+    if (ret < 0) {
+        LOG_ERR("IQS5xx read gesture1 err=%d", ret);
+        return;
     }
 
-    /*
-     * button pressed bits for a tap or something
-     */
+    // Map gestures to buttons
+    uint8_t btn = 0;
+    if (gesture0 & 0x01) btn |= 1; // SINGLE_TAP -> Left button
+    if (gesture1 & 0x01) btn |= 2; // 2_FINGER_TAP -> Right button
+    // Middle button (bit 2) is not mapped to any gesture here
+
+    // Handle button presses
     if (!cfg->no_taps && (btn || data->btn_cache)) {
         for (int i = 0; i < 3; i++) {
-            bool is_pressed_now = (btn & BIT(i)) != 0;
-            bool was_pressed = (data->btn_cache & BIT(i)) != 0;
+            bool is_pressed_now = (btn & (1 << i)) != 0;
+            bool was_pressed = (data->btn_cache & (1 << i)) != 0;
             if (is_pressed_now != was_pressed) {
                 input_report_key(dev, INPUT_BTN_0 + i, is_pressed_now ? 1 : 0, false, K_FOREVER);
             }
@@ -124,11 +132,15 @@ static void iqs5xx_report_data(const struct device *dev) {
     }
     data->btn_cache = btn;
 
-    /*
-     * Report relative motion as well.
-     * The final "true" parameter indicates "sync = true",
-     * i.e. finalize this input event.
-     */
+    // Apply inversion if configured
+    if (cfg->x_invert) {
+        rel_x = -rel_x;
+    }
+    if (cfg->y_invert) {
+        rel_y = -rel_y;
+    }
+
+    // Report relative movements
     input_report_rel(dev, INPUT_REL_X, rel_x, false, K_FOREVER);
     input_report_rel(dev, INPUT_REL_Y, rel_y, true, K_FOREVER);
 }
